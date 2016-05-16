@@ -101,8 +101,7 @@ class Rule:
 
             if self.port == 'ANY':
                 return True
-            elif isinstance(self.port, tuple):
-                print port
+            elif isinstance(self.port, list):
                 return port >= self.port[0] and port <= self.port[1]
             else:
                 return port == self.port
@@ -110,8 +109,13 @@ class Rule:
         return False
 
     def _match_icmp(self, pkt_info):
-        return self._match_address(pkt_info) and\
-            pkt_info.icmp_type == self.port
+        if self._match_address(pkt_info):
+            if self.port == 'ANY':
+                return True
+            else:
+                return pkt_info.icmp_type == self.port
+
+        return False
 
     def _match_dns(self, pkt_info):
         if self.domain.find('*') == 0:
@@ -217,7 +221,7 @@ class Firewall:
                 allow_pass = rule.action == 'PASS'
                 break
 
-        print allow_pass
+        print 'PASS' if allow_pass else 'DROP'
         if allow_pass:
             if pkt_dir == PKT_DIR_INCOMING:
                 self.iface_int.send_ip_packet(pkt)
