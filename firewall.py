@@ -32,7 +32,9 @@ def load_rules(filename, geodb):
                 row = [item.upper() for item in row]
                 rule = Rule(*row, geodb=geodb)
                 rules.append(rule)
-    return reversed(rules)
+
+    rules.reverse()
+    return rules
 
 
 def ip_to_int(ip, is_hex=False):
@@ -81,9 +83,9 @@ class Rule:
 
     def match_pkt(self, pkt_info):
         if pkt_info.protocol == self.protocol:
-            if self.protocol is TCP or self.protocol is UDP:
+            if self.protocol == TCP or self.protocol == UDP:
                 return self._match_tcp_udp(pkt_info)
-            elif self.protocol is ICMP:
+            elif self.protocol == ICMP:
                 return self._match_icmp(pkt_info)
         elif self.protocol == DNS and pkt_info.valid_dns:
             return self._match_dns(pkt_info)
@@ -92,14 +94,15 @@ class Rule:
 
     def _match_tcp_udp(self, pkt_info):
         if self._match_address(pkt_info):
-            if self.pkt_dir == PKT_DIR_INCOMING:
+            if pkt_info.pkt_dir == PKT_DIR_INCOMING:
                 port = pkt_info.src_port
-            elif self.pkt_dir == PKT_DIR_OUTGOING:
+            elif pkt_info.pkt_dir == PKT_DIR_OUTGOING:
                 port = pkt_info.dst_port
 
             if self.port == 'ANY':
                 return True
             elif isinstance(self.port, tuple):
+                print port
                 return port >= self.port[0] and port <= self.port[1]
             else:
                 return port == self.port
@@ -117,16 +120,16 @@ class Rule:
         return pkt_info.qname == self.domain
 
     def _match_address(self, pkt_info):
-        if self.pkt_dir == PKT_DIR_INCOMING:
+        if pkt_info.pkt_dir == PKT_DIR_INCOMING:
             address = pkt_info.src_ip
-        elif self.pkt_dir == PKT_DIR_OUTGOING:
+        elif pkt_info.pkt_dir == PKT_DIR_OUTGOING:
             address = pkt_info.dst_ip
 
         if self.address == 'ANY':
             return True
         elif isinstance(self.address, list):
             for addr_range in self.address:
-                if address >= range[0] and address <= range[1]:
+                if address >= addr_range[0] and address <= addr_range[1]:
                     return True
         else:
             return (address >> self.address[1]) == self.address[0]
@@ -143,54 +146,55 @@ class PacketInfo:
     def __init__(self, pkt_dir, pkt):
         self.pkt = pkt
         self.pkt_dir = pkt_dir
-        self.header_length = struct.unpack('!B', pkt[1:2]) * 4
+        self.header_length = (ord(pkt[0]) & 7) * 4
         self.src_ip = ip_to_int(pkt[12:16], True)
         self.dst_ip = ip_to_int(pkt[16:20], True)
         self.inner_packet = self.pkt[self.header_length:]
         self._set_protocol()
         self._set_inner_field()
-        self.set_dns_field()
+        self._set_dns_field()
 
     def _set_protocol(self):
-        protocol_id = struct.unpack('!B', self.pkt[9:10])
+        protocol_id = ord(self.pkt[9:10])
         self.protocol = self.PROTOCOL_MAP.get(protocol_id)
 
     def _set_inner_field(self):
-        if self.protocol is UDP or self.protocol is TCP:
-            self.src_port = struct.unpack('!H', self.inner_packet[0:2])
-            self.dst_port = struct.unpack('!H', self.inner_packet[2:4])
-        elif self.protocol is ICMP:
-            self.icmp_type = struct.unpack('!B', self.pkt[0:1])
+        if self.protocol == UDP or self.protocol == TCP:
+            self.src_port, = struct.unpack('!H', self.inner_packet[0:2])
+            self.dst_port, = struct.unpack('!H', self.inner_packet[2:4])
+        elif self.protocol == ICMP:
+            self.icmp_type = ord(self.pkt[0:1])
 
     def _set_dns_field(self):
-        if self.protocol is UDP and self.dst_port == 53:
+        self.valid_dns = False
+        if self.protocol == UDP and self.dst_port == 53:
             dns_packet = self.inner_packet[8:]
-            self.qd_count = struct.unpack('!H', dns_packet[4:5])
+            self.qd_count, = struct.unpack('!H', dns_packet[4:6])
 
-            self.valid_dns = False
             if self.qd_count == 1:
                 content = dns_packet[12:]
                 end_index = self._set_dns_qname(content)
                 self.qtype = content[end_index + 1:end_index + 3]
-                self.qtype = struct.unpack('!H', self.qtype)
-                self.qclass = content[end_index + 4:end_index + 6]
-                self.qclass = struct.unpack('!H', self.qclass)
+                self.qtype, = struct.unpack('!H', self.qtype)
+                self.qclass = content[end_index + 3:end_index + 5]
+                self.qclass, = struct.unpack('!H', self.qclass)
                 if ((self.qtype == 1 or self.qtype == 28) and
                         self.qclass == 1):
                     self.valid_dns = True
 
     def _set_dns_qname(self, question):
-        index = 1
         qname = []
-        while question[index] != 0x00:
-            byte = question[index]
-            if byte == 0x06 or byte == 0x03:
+        index = 1
+        byte = ord(question[index])
+        while byte != 0:
+            if byte == 6 or byte == 3:
                 qname.append('.')
             else:
-                qname.append(chr(byte))
+                qname.append(question[index])
             index += 1
+            byte = ord(question[index])
 
-        self.qname = ''.join(qname)
+        self.qname = ''.join(qname).upper()
         return index
 
 
@@ -210,11 +214,17 @@ class Firewall:
 
         for rule in self.rules:
             if rule.match_pkt(pkt_info):
-                allow_pass = rule.action == 'pass'
+                allow_pass = rule.action == 'PASS'
                 break
 
+        print allow_pass
         if allow_pass:
             if pkt_dir == PKT_DIR_INCOMING:
                 self.iface_int.send_ip_packet(pkt)
             elif pkt_dir == PKT_DIR_OUTGOING:
                 self.iface_ext.send_ip_packet(pkt)
+
+    def _get_matched_rule(self, pkt_info):
+        for rule in self.rules:
+            if rule.match_pkt(pkt_info):
+                return rule
