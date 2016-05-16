@@ -4,11 +4,6 @@ from main import PKT_DIR_INCOMING, PKT_DIR_OUTGOING
 import socket
 import struct
 
-
-# TODO: Feel free to import any Python standard moduless as necessary.
-# (http://docs.python.org/2/library/)
-# You must NOT use any 3rd-party libraries.
-
 TCP = 'TCP'
 UDP = 'UDP'
 DNS = 'DNS'
@@ -37,7 +32,7 @@ def load_rules(filename, geodb):
                 row = [item.upper() for item in row]
                 rule = Rule(*row, geodb=geodb)
                 rules.append(rule)
-    return rules
+    return reversed(rules)
 
 
 def ip_to_int(ip, is_hex=False):
@@ -72,19 +67,72 @@ class Rule:
             if len(address) == 2:
                 suffix = 32 - int(address[1])
 
+            ip = ip >> suffix
             self.address = (ip, suffix)
 
     def _set_port(self, port):
         if port == 'ANY':
-            self.port = 'ANY'
+            self.port = port
         else:
             try:
                 self.port = int(port)
             except ValueError:
                 self.port = map(int, port.split('-'))
 
+    def match_pkt(self, pkt_info):
+        if pkt_info.protocol == self.protocol:
+            if self.protocol is TCP or self.protocol is UDP:
+                return self._match_tcp_udp(pkt_info)
+            elif self.protocol is ICMP:
+                return self._match_icmp(pkt_info)
+        elif self.protocol == DNS and pkt_info.valid_dns:
+            return self._match_dns(pkt_info)
 
-class Packet:
+        return False
+
+    def _match_tcp_udp(self, pkt_info):
+        if self._match_address(pkt_info):
+            if self.pkt_dir == PKT_DIR_INCOMING:
+                port = pkt_info.src_port
+            elif self.pkt_dir == PKT_DIR_OUTGOING:
+                port = pkt_info.dst_port
+
+            if self.port == 'ANY':
+                return True
+            elif isinstance(self.port, tuple):
+                return port >= self.port[0] and port <= self.port[1]
+            else:
+                return port == self.port
+
+        return False
+
+    def _match_icmp(self, pkt_info):
+        return self._match_address(pkt_info) and\
+            pkt_info.icmp_type == self.port
+
+    def _match_dns(self, pkt_info):
+        if self.domain.find('*') == 0:
+            return pkt_info.qname.endswith(self.domain[1:])
+
+        return pkt_info.qname == self.domain
+
+    def _match_address(self, pkt_info):
+        if self.pkt_dir == PKT_DIR_INCOMING:
+            address = pkt_info.src_ip
+        elif self.pkt_dir == PKT_DIR_OUTGOING:
+            address = pkt_info.dst_ip
+
+        if self.address == 'ANY':
+            return True
+        elif isinstance(self.address, list):
+            for addr_range in self.address:
+                if address >= range[0] and address <= range[1]:
+                    return True
+        else:
+            return (address >> self.address[1]) == self.address[0]
+
+
+class PacketInfo:
 
     PROTOCOL_MAP = {
         1: ICMP,
@@ -112,7 +160,7 @@ class Packet:
             self.src_port = struct.unpack('!H', self.inner_packet[0:2])
             self.dst_port = struct.unpack('!H', self.inner_packet[2:4])
         elif self.protocol is ICMP:
-            self.type = struct.unpack('!B', self.pkt[0:1])
+            self.icmp_type = struct.unpack('!B', self.pkt[0:1])
 
     def _set_dns_field(self):
         if self.protocol is UDP and self.dst_port == 53:
@@ -154,14 +202,19 @@ class Firewall:
         self.geodb = load_geodb()
         self.rules = load_rules(config['rule'], self.geodb)
 
-        # TODO: Also do some initialization if needed.
-
     # @pkt_dir: either PKT_DIR_INCOMING or PKT_DIR_OUTGOING
     # @pkt: the actual data of the IPv4 packet (including IP header)
     def handle_packet(self, pkt_dir, pkt):
-        # TODO: Your main firewall code will be here.
-        pass
+        pkt_info = PacketInfo(pkt_dir, pkt)
+        allow_pass = True
 
-    # TODO: You can add more methods as you want.
+        for rule in self.rules:
+            if rule.match_pkt(pkt_info):
+                allow_pass = rule.action == 'pass'
+                break
 
-# TODO: You may want to add more classes/functions as well.
+        if allow_pass:
+            if pkt_dir == PKT_DIR_INCOMING:
+                self.iface_int.send_ip_packet(pkt)
+            elif pkt_dir == PKT_DIR_OUTGOING:
+                self.iface_ext.send_ip_packet(pkt)
