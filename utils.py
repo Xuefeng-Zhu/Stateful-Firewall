@@ -1,6 +1,5 @@
 import socket
 import struct
-from rule import Rule
 
 TCP = 'TCP'
 UDP = 'UDP'
@@ -21,6 +20,8 @@ def load_geodb(filename='geoipdb.txt'):
 
 
 def load_rules(filename, geodb):
+    from rule import Rule
+
     rules = []
     with open(filename) as f:
         raw_config = f.readlines()
