@@ -31,7 +31,3 @@ class Firewall:
             elif pkt_dir == PKT_DIR_OUTGOING:
                 self.iface_ext.send_ip_packet(pkt)
 
-    def _get_matched_rule(self, pkt_info):
-        for rule in self.rules:
-            if rule.match_pkt(pkt_info):
-                return rule
